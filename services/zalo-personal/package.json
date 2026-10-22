@@ -1,0 +1,19 @@
+{
+  "name": "zalo-personal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "start": "tsx --env-file-if-exists=.env src/index.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@trcf/bridge-core": "workspace:*",
+    "tsx": "^4.23.15",
+    "zca-js": "^2.2.0"
+  }
+}

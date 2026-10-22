@@ -6,192 +6,178 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `trcf_chat` là hệ thống quản lý chat tập trung (omnichannel inbox) cho **Facebook Messenger, Instagram và Zalo**, dùng **Chatwoot** làm giao diện/inbox cho nhân viên.
 
-- **Facebook & Instagram**: dùng channel có sẵn của Chatwoot (qua Meta App). Không cần viết code tích hợp, chỉ cấu hình.
-- **Zalo**: Chatwoot không hỗ trợ Zalo cá nhân → tự viết **zalo-bridge** (Node.js + [zca-js](https://tdung.gitbook.io/zca-js)) hỗ trợ **nhiều tài khoản Zalo**, mỗi tài khoản nối với một **API channel inbox** của Chatwoot.
-- **AI agent** trực tin nhắn khi không có nhân viên, dùng chung cho cả 3 kênh qua Agent Bot của Chatwoot.
+- **Facebook & Instagram**: channel có sẵn của Chatwoot (qua Meta App). Không cần code, chỉ cấu hình.
+- **Zalo cá nhân**: service `zalo-personal` (Node.js + [zca-js](https://tdung.gitbook.io/zca-js), không chính thức), đăng nhập QR, nhiều tài khoản.
+- **Zalo OA**: service `zalo-oa` (Zalo OA Open API chính thức: OAuth v4 + webhook), nhiều OA.
+- Mỗi tài khoản Zalo / mỗi OA nối với một **API channel inbox** của Chatwoot.
+- **AI agent** trực tin nhắn khi không có nhân viên, dùng chung cho mọi kênh qua Agent Bot của Chatwoot (chưa làm).
 
-> Trạng thái: đã dựng Chatwoot (bước 1) và code MVP zalo-bridge (bước 2: 1-1, văn bản). Chưa chạy thử end-to-end với tài khoản Zalo thật.
+> Trạng thái: Chatwoot chạy local; `zalo-personal` đã chạy thật với tài khoản Zalo (1-1, văn bản). `zalo-oa` đã viết xong và test giả lập (webhook ký đúng, gọi API Zalo thật bằng token giả), **chưa chạy với OA thật**.
 
 ### Quyết định đã chốt
-- **Không fork/clone source Chatwoot.** Chạy image Docker chính thức (`chatwoot/chatwoot`) bằng Docker Compose, mọi tích hợp đi qua API/webhook. Muốn đổi hành vi Chatwoot thì tìm cách qua API, Agent Bot hoặc cấu hình trước. Sửa source là phương án cuối và phải hỏi trước.
-- **Không dùng Dify (tạm thời).** Bot gọi Claude trực tiếp, knowledge base để trong file. Giữ phần gọi LLM tách riêng trong `agent/` để sau này có thể thay bằng Dify nếu cần.
+- **Không fork/clone source Chatwoot.** Chạy image Docker chính thức, mọi tích hợp qua API/webhook/Agent Bot/cấu hình. Sửa source là phương án cuối và phải hỏi trước.
+- **Hai service riêng + một package chung** (không gộp một process): `zalo-personal` và `zalo-oa` chạy, deploy, bật/tắt độc lập, mỗi service một database. Code dùng chung nằm ở `packages/bridge-core`.
+- **Giữ thẻ "Zalo" / "Zalo OA" trong Add Inbox** (chèn qua `DASHBOARD_SCRIPTS`) dù không phải extension point chính thức; tab Dashboard App là đường dự phòng chính thống.
+- **Không xóa contact** khi gỡ kênh/xóa inbox: contact là dữ liệu khách hàng dùng chung của account Chatwoot.
+- **Không dùng Dify (tạm thời).** Bot gọi Claude trực tiếp, knowledge base trong file.
 
 ## Cấu trúc thư mục
 
+pnpm workspace ở thư mục gốc (`pnpm-workspace.yaml`, `tsconfig.base.json`).
+
 ```
-infra/chatwoot/            docker-compose.yml, .env.example, init-env.sh (Rails, Sidekiq, Postgres, Redis)
-  postgres-init/           tạo database `zalo_bridge` khi volume postgres khởi tạo lần đầu
-services/zalo-bridge/      Node.js + TypeScript (pnpm)
-  src/index.ts             entrypoint: migrate DB, HTTP server, AccountManager
-  src/http.ts              Hono: GET /health (chỉ số lượng), POST /webhooks/chatwoot/:ownId, mount /admin
-  src/admin/               chatwoot-script.ts (thẻ kênh Zalo chèn vào Chatwoot), trang quản trị (đăng nhập bằng phiên Chatwoot Administrator): danh sách tài khoản, nút quét QR, kết nối lại
-  src/zalo/                AccountManager (1 phiên zca-js/tài khoản, reconnect), QrLoginManager, đăng ký tài khoản
-  src/chatwoot/            API client, xác minh chữ ký + schema payload webhook
-  src/store/               Drizzle schema, repo, mã hóa credentials, migrate
-  src/bridge/              inbound (Zalo → Chatwoot), outbound (Chatwoot → Zalo), KeyedQueue
-  drizzle/                 migration SQL (sinh bằng `pnpm db:generate`, commit vào repo)
-  src/agent/               (chưa có) AI bot
-knowledge/                 (chưa có) knowledge base cho bot
+infra/chatwoot/              docker-compose.yml, .env.example, init-env.sh (Rails, Sidekiq, Postgres, Redis)
+  postgres-init/             tạo database zalo_personal, zalo_oa khi volume postgres khởi tạo lần đầu
+packages/bridge-core/        @trcf/bridge-core — code dùng chung, export qua src/index.ts (chạy thẳng TS bằng tsx)
+  src/run.ts                 runBridge(): migrate DB, HTTP server, connector, đối chiếu inbox, shutdown
+  src/http.ts                Hono: /health, /admin, /chatwoot/channel-card.js, POST /webhooks/chatwoot/:key
+  src/channels/              ChannelConnector/ConnectSessions/InboundMessage (types.ts), registerChannel()
+  src/bridge/                inbound (Zalo → Chatwoot), outbound (Chatwoot → Zalo), inbox-sync, KeyedQueue
+  src/chatwoot/              API client, xác minh chữ ký + schema webhook Chatwoot
+  src/admin/                 trang quản trị dùng chung (page.ts), auth bằng phiên Chatwoot, script thẻ kênh
+  src/store/                 Drizzle schema (channels, threads), repo, mã hóa credentials
+  drizzle/                   migration SQL (sinh bằng `pnpm db:generate`, commit vào repo)
+services/zalo-personal/      cổng 3200, DB zalo_personal
+  src/zalo/                  AccountManager (1 phiên zca-js/tài khoản), QrLoginManager, messages, credentials
+services/zalo-oa/            cổng 3201, DB zalo_oa
+  src/oa/                    api.ts (OAuth + OA API), oa-manager.ts (token, gửi tin, sự kiện), oauth.ts, webhook.ts, routes.ts
 ```
+
+Chưa có: `src/agent/` (AI bot), `knowledge/` (knowledge base).
 
 ## Kiến trúc
 
 ```
-Facebook ─┐
-Instagram ┴─(Meta webhook)──► Chatwoot (Docker) ◄──► Nhân viên (Web/App)
-                                ▲   │   │
-          Application API       │   │   │ Agent Bot webhook
-          (contact/conv/msg)    │   │   ▼
-                                │   │  agent/ ──► Claude API
-                                │   │ API inbox callback (message_created)
-                                │   ▼
-                    ┌──────────────────────────────────┐
-                    │        zalo-bridge (Node.js)      │
-                    │  AccountManager: Zalo #1 … #N     │
-                    │  mỗi account = 1 Zalo instance    │
-                    │  + 1 API inbox + proxy riêng      │
-                    └──────────────────────────────────┘
-                          ▲ │            ▲ │
-                          │ ▼            │ ▼
-                     Zalo acc #1   …  Zalo acc #N
+Facebook/Instagram ─(Meta)─► Chatwoot (Docker) ◄──► Nhân viên
+                               ▲  │
+          Application API      │  │ API inbox callback (message_created, ký HMAC)
+                               │  ▼
+          ┌──────────────── @trcf/bridge-core (dùng chung) ────────────────┐
+          │ inbound pipeline · outbound · inbox-sync · /admin · thẻ kênh   │
+          ├───────────────────────────────┬────────────────────────────────┤
+          │ zalo-personal (3200)           │ zalo-oa (3201)                 │
+          │ zca-js listener, QR            │ OAuth v4 PKCE, webhook Zalo    │
+          └───────────────▲───────────────┴───────────────▲────────────────┘
+                 Zalo cá nhân #1..N                 Zalo OA #1..N
 ```
 
-### Luồng Zalo → Chatwoot (inbound)
-1. Listener của tài khoản `ownId` nhận `UserMessage | GroupMessage` với `msg.type` (`ThreadType.User` / `ThreadType.Group`), `msg.threadId`, `msg.isSelf`, `msg.data`.
-2. Bỏ qua `msg.isSelf === true` (tránh vòng lặp khi bridge tự gửi tin).
-3. Tra mapping theo khóa **`(ownId, threadId)`**. Nếu chưa có:
-   - `POST /api/v1/accounts/{account_id}/contacts` với `inbox_id` (inbox của tài khoản đó), `name`, `identifier = "zalo:<ownId>:<threadId>"` → lấy `contact_inboxes[].source_id`. Khóa có `ownId` vì chưa chắc ID người dùng Zalo giống nhau khi nhìn từ các tài khoản khác nhau.
-   - `POST /api/v1/accounts/{account_id}/conversations` với `source_id`, `inbox_id`, `contact_id`.
-4. `POST /api/v1/accounts/{account_id}/conversations/{conversation_id}/messages` với `message_type: "incoming"`. File/ảnh gửi dạng multipart `attachments[]`.
-5. Tin nhắn nhóm: **một nhóm Zalo = một contact + một conversation**. Thêm tên người gửi vào đầu nội dung (VD `Tên: nội dung`) vì Chatwoot không phân biệt nhiều người gửi trong một contact.
+### Mô hình dữ liệu (mỗi service một database, cùng schema)
+- `channels`: `key` (`zalo:<ownId>` | `oa:<oaId>`), `kind` (`zalo_personal` | `zalo_oa`), `external_id`, `display_name`, `chatwoot_inbox_id`, `webhook_secret` (secret của API inbox), `credentials` (mã hóa AES-256-GCM: Credentials zca-js hoặc OaTokens), `status`.
+- `threads`: `(channel_key, thread_id)` ↔ `chatwoot_contact_id`, `chatwoot_source_id`, `chatwoot_conversation_id`, `thread_type`. Xóa channel → cascade threads.
+- Contact identifier trên Chatwoot: `<channelKey>:<threadId>` (VD `zalo:123:456`, `oa:789:uid`).
 
-### Luồng Chatwoot → Zalo (outbound)
-1. Chatwoot POST tới callback URL của API inbox với `event: "message_created"`.
-2. **Chỉ xử lý** khi `message_type === "outgoing"` và `private === false` (bỏ qua tin `incoming` do bridge tạo và ghi chú nội bộ). Tin của AI bot cũng là `outgoing` nên cũng được gửi đi theo luồng này.
-3. Từ `inbox.id` trong payload → tài khoản Zalo tương ứng. Từ conversation → `threadId` + `ThreadType`. Gọi `api.sendMessage(content | { msg, attachments, quote }, threadId, threadType)` bằng **đúng instance của tài khoản đó**. Attachment của Chatwoot có `data_url` → tải về file tạm rồi truyền đường dẫn vào `attachments`.
-4. Xác minh chữ ký webhook bằng secret **của từng API inbox** (mỗi inbox có secret riêng) trước khi xử lý: `X-Chatwoot-Signature: sha256=HMAC_SHA256(secret, "<X-Chatwoot-Timestamp>.<raw body>")`.
-5. Trả HTTP ngay (timeout webhook của Chatwoot là 5s), gửi Zalo chạy nền, rồi cập nhật trạng thái tin bằng `PATCH /conversations/{id}/messages/{message_id}` với `status: "delivered" | "failed"` và `external_error` (chỉ dùng được cho API inbox). **Chatwoot không gửi lại webhook của API inbox khi lỗi**, nên mọi lỗi phải đánh dấu `failed` để nhân viên thấy.
+### Luồng Zalo → Chatwoot (inbound, dùng chung)
+1. Connector chuẩn hóa tin thành `InboundMessage` (`threadId`, `threadType`, `contactName`, `resolveContactName?`, `sourceId`, `content`) rồi gọi `onInbound(channel, message)`.
+2. `bridge/inbound.ts`: tra `threads`; chưa có thì tạo contact (`resolveContactName` chỉ gọi lúc này) + conversation; 422 identifier trùng → dùng lại contact cũ.
+3. `POST /conversations/{id}/messages` với `message_type: "incoming"`, `source_id` = ID tin phía Zalo. 404 (conversation bị xóa) → tạo lại một lần.
+4. Mỗi thread một conversation cố định (incoming vào conversation đã resolve thì Chatwoot tự mở lại). Xử lý tuần tự theo thread bằng `KeyedQueue`.
 
-> Shape payload/response trong code lấy từ source Chatwoot v4.18 (`lib/webhooks/trigger.rb`, `app/models/message.rb#webhook_data`, `app/views/api/v1/...`). Khi nâng version Chatwoot hoặc cần field mới, đọc lại source trong container (`docker compose exec rails sh`), đừng đoán.
+### Luồng Chatwoot → Zalo (outbound, dùng chung)
+1. Chatwoot POST `message_created` tới `/webhooks/chatwoot/<channelKey>` (callback URL của API inbox).
+2. Xác minh `X-Chatwoot-Signature: sha256=HMAC_SHA256(inboxSecret, "<X-Chatwoot-Timestamp>.<raw body>")`, chỉ xử lý `message_type === "outgoing"` và `private === false`.
+3. Trả 204 ngay (timeout webhook Chatwoot 5s), gọi `connector.sendText()` chạy nền, rồi `PATCH /conversations/{id}/messages/{message_id}` với `status: "delivered" | "failed"` + `external_error`. **Chatwoot không gửi lại webhook của API inbox khi lỗi**, mọi lỗi phải đánh dấu `failed`.
 
-### Mapping store
-Database `zalo_bridge` (cùng server Postgres với Chatwoot nhưng tách database, không ghi vào DB của Chatwoot), dùng Drizzle ORM:
-- `zalo_accounts`: `own_id`, tên hiển thị, `chatwoot_inbox_id`, webhook secret, proxy, trạng thái, credentials (mã hóa).
-- `threads`: `(own_id, zalo_thread_id)` ↔ `chatwoot_contact_id`, `chatwoot_source_id`, `chatwoot_conversation_id`, `thread_type`.
-- Mỗi thread Zalo dùng **một conversation cố định**: tin incoming vào conversation đã resolve thì Chatwoot tự mở lại. Nếu conversation bị xóa (404) thì tạo mới và cập nhật mapping.
-- Xử lý tin theo `KeyedQueue` (tuần tự theo thread/conversation) để giữ thứ tự và không tạo trùng contact/conversation.
+> Shape payload/response lấy từ source Chatwoot v4.18 (`lib/webhooks/trigger.rb`, `app/models/message.rb#webhook_data`, `app/views/api/v1/...`). Khi nâng version hoặc cần field mới, đọc lại source trong container (`docker compose exec rails sh`), đừng đoán.
 
-## Nhiều tài khoản Zalo
+### Thêm / gỡ kênh
+- **Thêm**: thẻ "Zalo" / "Zalo OA" trong Settings → Inboxes → Add Inbox mở popup iframe `<service>/admin?connect`. Xong thì popup `postMessage` `zalo:connected` (origin = Chatwoot) và Chatwoot chuyển tới `/settings/inboxes/new/<inboxId>/agents` (bước thêm nhân viên có sẵn). `registerChannel()` tạo API inbox `"Zalo - <tên>"` / `"Zalo OA - <tên>"`; kênh đã có thì chỉ cập nhật credentials. Connector `connect(key)` ngay, không cần khởi động lại.
+- **Gỡ = xóa inbox trên Chatwoot.** Chatwoot không có webhook `inbox_deleted` nên `bridge/inbox-sync.ts` đối chiếu `GET /inboxes` lúc khởi động và mỗi 60s, kênh mất inbox thì `connector.remove()`. Đọc danh sách channel **trước** khi lấy danh sách inbox (không xóa nhầm kênh vừa thêm); lấy inbox lỗi thì không xóa gì.
 
-- **Mỗi tài khoản = một instance `new Zalo({...})` riêng** (để có proxy riêng qua option `agent`) và một `api` riêng. Quản lý tập trung trong `AccountManager`, key theo `api.getOwnId()`.
-- **Mỗi tài khoản Zalo ↔ một API channel inbox** trên Chatwoot (đặt tên VD `Zalo - <tên tài khoản>`) để nhân viên biết tin đến từ số nào, và để định tuyến tin trả lời đúng tài khoản. Khi thêm tài khoản, có thể tạo inbox tự động qua Chatwoot API.
-- **Thêm tài khoản**: nút "Thêm tài khoản Zalo" trên trang `/admin` → `QrLoginManager` gọi `zalo.loginQR({}, callback)` và trả ảnh QR (base64) cho trang hiển thị, không ghi file. Khi có callback, zca-js không tự lưu file QR, và khi `QRCodeExpired`/`QRCodeDeclined` phải tự gọi `actions.abort()`/`retry()`, nếu không promise sẽ treo. Sau khi đăng nhập: lưu cookie/imei/userAgent (`snapshotCredentials`) mã hóa vào DB, tài khoản mới thì tạo API inbox, rồi `AccountManager.connectAccount()` kết nối ngay, không cần khởi động lại.
-- **Gỡ tài khoản = xóa inbox Zalo trên Chatwoot** (giống ngắt kết nối kênh Facebook). Chatwoot không có webhook `inbox_deleted`, nên `bridge/inbox-sync.ts` đối chiếu `GET /inboxes` lúc khởi động và mỗi 60s: tài khoản có inbox không còn tồn tại thì ngắt listener và xóa khỏi DB (credentials + threads). Đọc danh sách tài khoản **trước** khi lấy danh sách inbox để không xóa nhầm tài khoản vừa thêm; lấy danh sách inbox lỗi thì không xóa gì. Phiên Zalo Web vẫn còn trong danh sách thiết bị của app Zalo, người dùng tự đăng xuất trên điện thoại nếu muốn.
-- **Khởi động lại**: đăng nhập lại tất cả tài khoản bằng cookie (`zalo.login({ cookie, imei, userAgent })`), lần lượt từng tài khoản, không đăng nhập ồ ạt cùng lúc.
-- **Cô lập lỗi**: một tài khoản lỗi/mất kết nối không được làm ảnh hưởng tài khoản khác hay làm crash process. Theo dõi trạng thái từng tài khoản (`online`, `disconnected`, `needs_relogin`), tự reconnect có backoff, và cảnh báo khi cần quét QR lại.
-- **Proxy**: trên Node.js dùng `agent: new HttpProxyAgent(url)` kèm `polyfill: nodefetch` (fetch gốc của Node không hỗ trợ proxy). Nên dùng mỗi tài khoản một IP để giảm rủi ro bị khóa.
-- **Rate limit/queue gửi tin theo từng tài khoản.**
+## Zalo cá nhân (`services/zalo-personal`, zca-js)
 
-## AI agent trực tin nhắn (khi không có nhân viên)
+- **Thư viện không chính thức**, vi phạm chính sách Zalo → **tài khoản có thể bị khóa**. Dùng tài khoản riêng, giới hạn tốc độ gửi.
+- **Mỗi tài khoản một instance `new Zalo({...})`** (để có proxy riêng) và một phiên listener. `listener.start({ retryOnClose: true })`; `closed` chỉ phát khi zca-js bỏ cuộc → service tự đăng nhập lại có backoff.
+- **Mỗi tài khoản chỉ một web listener**: mở Zalo Web/PC ở nơi khác → `CloseReason.DuplicateConnection` → trạng thái `duplicate_connection`, **không tự reconnect** (tránh giành phiên), người dùng bấm "Kết nối lại" ở `/admin`.
+- **QR**: `zalo.loginQR({}, callback)` trả ảnh base64 cho trang admin, không ghi file. Có callback thì zca-js không tự lưu file, và khi `QRCodeExpired`/`QRCodeDeclined` phải tự gọi `actions.abort()`/`retry()`, nếu không promise treo.
+- Credentials (cookie/imei/userAgent, `snapshotCredentials`) là **bí mật**: lưu mã hóa, lưu lại định kỳ 30 phút, không log, không commit.
+- Tin nhóm hiện bị bỏ qua; ảnh/file hiện dạng `[Ảnh] <link>` (bước "Ảnh, file và nhóm").
+- Proxy (chưa làm): Node.js dùng `agent: new HttpProxyAgent(url)` kèm `polyfill: nodefetch`.
+- zca-js 2.2.0 có `index.d.ts` gốc lỗi với `moduleResolution: NodeNext`, `services/zalo-personal/tsconfig.json` dùng `paths` trỏ về `dist/index.d.ts`. Luôn tra type definitions trong `node_modules/zca-js` trước khi dùng API.
 
-Dùng cơ chế **Agent Bot** của Chatwoot: bot được gắn vào inbox, nhận webhook và trả lời qua API. Vì bot trả lời bằng tin `outgoing` bình thường, nên **chạy được cho cả Facebook, Instagram và Zalo** mà không cần code riêng từng kênh.
+## Zalo OA (`services/zalo-oa`, Open API chính thức)
 
-### Cơ chế Chatwoot
-- Tạo Agent Bot (`POST /api/v1/accounts/{account_id}/agent_bots` hoặc trong Settings/Super Admin) với `outgoing_url` trỏ về service, rồi gắn bot vào từng inbox.
-- Khi inbox có bot, conversation mới ở trạng thái **`pending`** → bot xử lý.
-- Bot gửi trả lời: `POST /conversations/{id}/messages` với `message_type: "outgoing"`, dùng **access token của bot** (không dùng token nhân viên).
-- **Chuyển giao cho người (handoff)**: `POST /conversations/{id}/toggle_status` với `status: "open"` (có thể kèm ghi chú nội bộ tóm tắt yêu cầu khách). Sau khi `open`, bot **không được trả lời** conversation đó nữa.
-- Các endpoint trên viết theo trí nhớ, cần đối chiếu tài liệu Chatwoot trước khi code.
+Nguồn: developers.zalo.me/docs/official-account (bản đọc được: `https://stc-developers.zdn.vn/docs/v2/official-account/<path>?lang=vi`) và SDK chính thức github.com/zaloplatform.
 
-### Khi nào bot trả lời (cấu hình được, mặc định = kết hợp)
-1. Ngoài giờ làm việc (theo working hours của inbox trong Chatwoot).
-2. Không có nhân viên online (`GET /api/v1/accounts/{account_id}/agents` → `availability_status`).
-3. Khách chờ quá N phút mà chưa có nhân viên trả lời.
+- **Yêu cầu phía Zalo**: OA đã xác thực + gói **Tăng trưởng hoặc Toàn diện** mới liên kết app qua API; một app trên developers.zalo.me được nhiều OA cấp quyền. Khai báo trong app: **Callback URL** `<BRIDGE_EXTERNAL_URL>/zalo-oa/callback`, **Webhook URL** `<BRIDGE_EXTERNAL_URL>/zalo-oa/webhook` (HTTPS, domain phải xác thực trong app; service in ra 2 URL này lúc khởi động) và bật các sự kiện `user_send_*`.
+- **OAuth v4 + PKCE**: `https://oauth.zaloapp.com/v4/oa/permission?app_id&redirect_uri&code_challenge&state`; đổi code tại `POST https://oauth.zaloapp.com/v4/oa/access_token` (form-urlencoded, header `secret_key`). Callback chạy trên domain công khai nên **không có cookie Chatwoot**: `state` ngẫu nhiên do phiên admin tạo là bằng chứng xác thực.
+- **Token**: access token 25 giờ; refresh token 3 tháng, **dùng một lần và được xoay vòng** (token cũ mất hiệu lực ngay khi có token mới). `OaManager.refresh()` single-flight mỗi OA, **lưu DB ngay** cặp token mới, làm mới trước hạn 1 giờ; lỗi mà access token cũ hết hạn → `needs_relogin` ("Cấp quyền lại").
+- **Webhook**: `X-ZEvent-Signature: mac=` + hex(**sha256 thường**, không phải HMAC)(appId + raw body + `timestamp` trong body + OA Secret Key). Phải trả 200 **trong 2 giây** → xử lý nền. Zalo chỉ retry khi không mở được kết nối (30s → 1h), lỗi kéo dài thì webhook bị tắt. Chống trùng theo `msg_id`. Chỉ chuyển `user_send_*`; `oa_send_*` (echo tin OA gửi) bị bỏ qua để tránh vòng lặp.
+- **Gửi tin tư vấn**: `POST https://openapi.zalo.me/v3.0/oa/message/cs` (header `access_token`), tối đa 2000 ký tự. Chỉ gửi được khi người dùng tương tác trong **7 ngày**; miễn phí trong 48 giờ (không giới hạn số tin từ 1/1/2026), ngoài 48 giờ tính phí/quota. OA API trả HTTP 200 kèm `error` ≠ 0 khi lỗi; mã lỗi hay gặp có thông điệp tiếng Việt trong `oa/api.ts` (`-216/-220` token → làm mới rồi gửi lại một lần).
+- Tên khách: `GET /v3.0/oa/user/detail?data={"user_id":...}` → `display_name`, chỉ gọi khi tạo contact mới (`resolveContactName`).
+- `GET /v2.0/oa/getoa` (lấy oa_id + tên sau khi cấp quyền) theo SDK chính thức, chưa thấy trong tài liệu mới.
+- Khi dev: cần tunnel HTTPS công khai tới cổng 3201 cho `BRIDGE_EXTERNAL_URL`.
 
-Khi đang trong giờ làm và có nhân viên online → bot handoff ngay (hoặc chỉ gửi lời chào), không tự trả lời.
+## AI agent trực tin nhắn (chưa làm)
 
-### Quy tắc cho bot
-- Chống vòng lặp: bỏ qua mọi event không phải tin `incoming` của khách (tin của chính bot, của nhân viên, ghi chú nội bộ).
-- Chỉ trả lời dựa trên **knowledge base** trong `knowledge/` đưa vào prompt. Không bịa giá, chính sách, không xác nhận đơn hàng/thanh toán.
-- Handoff khi: khách yêu cầu gặp người, khiếu nại/bức xúc, câu hỏi ngoài knowledge base, liên quan tiền/đơn hàng, hoặc bot không chắc chắn.
-- Nói rõ với khách đây là trợ lý tự động và nhân viên sẽ liên hệ lại trong giờ làm việc.
-- Lấy lịch sử hội thoại từ Chatwoot (`GET /conversations/{id}/messages`) làm context, không tự lưu bản sao riêng.
-- Trả lời bằng tiếng Việt, ngắn gọn, phù hợp chat (không dùng markdown phức tạp vì Zalo/Messenger không render).
+Dùng **Agent Bot** của Chatwoot: bot gắn vào inbox, nhận webhook, trả lời bằng tin `outgoing` → chạy được cho mọi kênh (tin của bot vào inbox Zalo đi qua outbound như tin nhân viên).
 
-### LLM
-- Dùng Claude qua SDK chính thức `@anthropic-ai/sdk`, model mặc định `claude-opus-5-5` (chat ngắn → `output_config.effort: "low"`). Đọc tài liệu SDK/skill `claude-api` trước khi viết code gọi API, không đoán tham số.
-- Kiểm tra `stop_reason` (đặc biệt `refusal`) trước khi đọc nội dung. Lỗi hoặc refusal → handoff thay vì im lặng.
-- Dùng prompt caching cho phần system prompt + knowledge base (phần ổn định đặt trước).
-
-## Ràng buộc quan trọng của zca-js
-
-- **Thư viện không chính thức**, vi phạm chính sách Zalo → **tài khoản có thể bị khóa**. Nên dùng tài khoản riêng cho doanh nghiệp, giới hạn tốc độ gửi, không gửi spam hàng loạt.
-- **Mỗi tài khoản chỉ có một web listener tại một thời điểm.** Mở Zalo Web trên trình duyệt sẽ làm listener của bridge bị ngắt → phải phát hiện mất kết nối, reconnect và cảnh báo. Dặn nhân viên không mở Zalo Web cho các tài khoản đã nối vào bridge.
-- Khởi tạo: `new Zalo({ selfListen: false, checkUpdate: true, logging: true })`, sau khi đăng nhập phải gọi `api.listener.start()`.
-- Credentials Zalo (cookie/imei/userAgent) là **bí mật** (tương đương mật khẩu): lưu mã hóa, không log, không commit.
-- Listener khác: `reaction`, `undo`, `group_event`. Có thể map `undo` sang việc đánh dấu tin trên Chatwoot sau này.
-- Tài liệu: thêm `.md` vào cuối URL trang GitBook để đọc dạng Markdown, mục lục ở `https://tdung.gitbook.io/zca-js/llms.txt`. Luôn tra type definitions trong `node_modules/zca-js` trước khi dùng API, vì API thay đổi theo phiên bản.
+- Tạo Agent Bot (`POST /api/v1/accounts/{account_id}/agent_bots` hoặc Settings) với `outgoing_url` trỏ về service, gắn vào inbox. Conversation mới ở `pending` → bot xử lý. Bot trả lời bằng **access token của bot**. Handoff: `POST /conversations/{id}/toggle_status` `status: "open"` (kèm ghi chú nội bộ tóm tắt); sau khi `open` bot không trả lời nữa. Các endpoint này viết theo trí nhớ, đối chiếu source Chatwoot trước khi code.
+- Khi nào bot trả lời (cấu hình được, mặc định kết hợp): ngoài giờ làm việc của inbox; không có nhân viên online (`GET /agents` → `availability_status`); khách chờ quá N phút.
+- Quy tắc: bỏ qua mọi event không phải tin `incoming` của khách; chỉ trả lời dựa trên `knowledge/`; không bịa giá/chính sách, không xác nhận đơn/thanh toán; handoff khi khách đòi gặp người, khiếu nại, ngoài knowledge base, liên quan tiền/đơn, hoặc không chắc; nói rõ là trợ lý tự động; context lấy từ `GET /conversations/{id}/messages`; tiếng Việt ngắn gọn, không markdown phức tạp.
+- LLM: Claude qua `@anthropic-ai/sdk`, model mặc định `claude-opus-5-5` (chat ngắn → `output_config.effort: "low"`). Đọc skill `claude-api` trước khi viết code. Kiểm tra `stop_reason` (đặc biệt `refusal`); lỗi/refusal → handoff. Prompt caching cho system prompt + knowledge base.
 
 ## Chatwoot
 
-- Chạy bằng Docker Compose trong `infra/chatwoot/` (Rails + Sidekiq + Postgres + Redis), dùng image chính thức và **pin version** (đang dùng `v4.18.0`, không dùng `latest`). Database của Chatwoot là `chatwoot_production`.
-- Dev local: Chatwoot ở http://localhost:3100, Postgres ở `localhost:5433` (máy dev đã có service khác chiếm 3000/5432). Biến cổng host tên `*_HOST_PORT`. **Không đặt `POSTGRES_PORT` trong `.env`**, vì Chatwoot đọc biến này làm cổng kết nối DB bên trong mạng Docker.
-- `SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true` là bắt buộc: Chatwoot mặc định chặn webhook tới IP nội bộ (SSRF filter), mà bridge chạy cùng máy/mạng Docker. Khi dev, bridge chạy trên host và Chatwoot gọi qua `http://host.docker.internal:3200`. **Không thêm `extra_hosts: host-gateway`** vào compose: nó thêm bản ghi IPv6, Ruby chọn IPv6 trước và webhook lỗi "Network unreachable" (tin hiện "Failed to send"). Kiểm tra kết nối bằng đúng HTTP client của Chatwoot: `docker compose exec sidekiq bundle exec rails runner 'SafeFetch.fetch("http://host.docker.internal:3200/health", validate_content_type: false) { |r| puts r.tempfile.read }'`. Ở production trên Linux, chạy bridge trong cùng Docker network và gọi bằng tên service.
-- Facebook/Instagram cần Meta App: `FB_APP_ID`, `FB_APP_SECRET`, `FB_VERIFY_TOKEN`, `IG_VERIFY_TOKEN`. Ở các bản Chatwoot mới, các giá trị này cấu hình trong `/super_admin` → Installation Config. Meta yêu cầu domain **HTTPS** công khai. Khi dev local dùng tunnel (cloudflared/ngrok).
-- Quyền nhắn tin của Meta App (Messenger, Instagram) cần **App Review** mới dùng được với khách thật. Nộp sớm vì có thể mất vài ngày đến vài tuần.
-- Zalo dùng **API channel inbox** (mỗi tài khoản Zalo một inbox), callback URL trỏ tới webhook của zalo-bridge.
-- Bridge gọi API bằng header `api_access_token` của **một user Chatwoot riêng cho bridge có quyền Administrator** (cần để tạo inbox và đọc `secret` của inbox; không dùng tài khoản cá nhân của ai). Inbox tạo qua API chưa có nhân viên nào: phải thêm collaborator trong Settings → Inboxes.
+- Docker Compose trong `infra/chatwoot/`, image chính thức **pin version** (`v4.18.0`). Database của Chatwoot là `chatwoot_production`.
+- Dev local: Chatwoot http://localhost:3100, Postgres `localhost:5433` (máy dev có service khác chiếm 3000/5432). Biến cổng host tên `*_HOST_PORT`. **Không đặt `POSTGRES_PORT` trong `.env`** (Chatwoot đọc nó làm cổng DB trong mạng Docker).
+- `SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true` là bắt buộc (Chatwoot mặc định chặn webhook tới IP nội bộ). Dev: service chạy trên host, Chatwoot gọi `http://host.docker.internal:<port>`. **Không thêm `extra_hosts: host-gateway`**: nó thêm bản ghi IPv6, Ruby chọn IPv6 trước và webhook lỗi "Network unreachable" (tin "Failed to send"). Kiểm tra bằng đúng HTTP client của Chatwoot: `docker compose exec sidekiq bundle exec rails runner 'SafeFetch.fetch("http://host.docker.internal:3200/health", validate_content_type: false) { |r| puts r.tempfile.read }'`. Production Linux: chạy service trong cùng Docker network, gọi bằng tên service.
+- Service gọi API bằng `api_access_token` của **user Administrator** (cần để tạo inbox và đọc `secret` của inbox). Inbox tạo qua API chưa có nhân viên: thêm ở Settings → Inboxes → Collaborators (bước "Thêm đại lý" sau khi kết nối).
+- **`DASHBOARD_SCRIPTS`** (Installation Config, đặt qua Super Admin → Settings hoặc `rails runner` + `GlobalConfig.clear_cache`):
+  ```html
+  <script src="http://localhost:3200/chatwoot/channel-card.js"></script>
+  <script src="http://localhost:3201/chatwoot/channel-card.js"></script>
+  ```
+  Script (`bridge-core/src/admin/channel-card-script.ts`) clone thẻ API trong lưới `.grid > button` (chỉ tìm trong lưới vì sidebar cũng có icon `.i-woot-api`). Dựa vào DOM Chatwoot v4.18 (`ChannelList.vue`, `ChannelSelector.vue`): nâng version phải kiểm tra lại. Inbox vẫn hiện icon API (đổi icon cần fork). Production phải sửa URL.
+- **Dashboard App "Zalo"** (Settings → Integrations → Dashboard Apps, URL `http://localhost:3200/admin`): tab trong màn hình cuộc chat. Có thể thêm "Zalo OA" trỏ `http://localhost:3201/admin`.
+- **Trang `/admin` không có mật khẩu riêng**: đọc cookie `cw_d_session_info` của dashboard Chatwoot (header devise_token_auth `access-token`/`client`/`uid`), gọi `GET /api/v1/profile` kiểm tra user là **administrator** của `CHATWOOT_ACCOUNT_ID` (cache 60s). Phải **cùng host với Chatwoot**: dev dùng `localhost` (không dùng 127.0.0.1), production cùng domain qua reverse proxy. POST yêu cầu header `x-requested-with: zalo-admin` (chống CSRF).
+- Facebook/Instagram cần Meta App (`FB_APP_ID`, `FB_APP_SECRET`, `FB_VERIFY_TOKEN`, `IG_VERIFY_TOKEN`, bản mới cấu hình trong `/super_admin`), domain HTTPS công khai, và **App Review** (nộp sớm).
+- Tính năng Enterprise (SAML, Captain, SLA, Custom Roles, Audit Logs...) bị khóa bằng license; không sửa source để mở.
 - Tài liệu: https://developers.chatwoot.com
 
 ## Lộ trình
 
-Ưu tiên theo thứ tự:
-
-1. **Chatwoot**: dựng bằng Docker Compose, tạo account/nhân viên, có domain HTTPS (hoặc tunnel khi dev).
-2. **zalo-bridge MVP (1 tài khoản)**: đăng nhập QR, lưu session, nhận/gửi tin văn bản 1-1 qua API inbox.
-3. **Nhiều tài khoản**: AccountManager, inbox riêng mỗi tài khoản, proxy, reconnect, trạng thái và cảnh báo.
-4. **Ảnh, file và nhóm**: attachment hai chiều, tin nhắn nhóm (reaction/undo nếu kịp).
+1. ~~Chatwoot~~ · 2. ~~Bridge 1 tài khoản Zalo~~ · 3. Nhiều tài khoản (đã có; còn proxy, rate limit gửi theo tài khoản) · Zalo OA (đã viết, cần chạy với OA thật)
+4. **Ảnh, file và nhóm**: attachment hai chiều (cá nhân: `sendMessage` `attachments`; OA: upload `/v2.0/oa/upload/image|file`), tin nhắn nhóm (cá nhân), reaction/undo nếu kịp.
 5. **AI agent**: Agent Bot, điều kiện kích hoạt, knowledge base, handoff.
-6. **Production**: deploy VPS, HTTPS, backup Postgres, giám sát.
+6. **Production**: deploy VPS, HTTPS + reverse proxy cùng domain, backup Postgres, giám sát.
 
-Facebook + Instagram không nằm trong lộ trình code: chỉ là cấu hình có sẵn của Chatwoot (Meta App, kết nối Page/IG, App Review).
+Facebook + Instagram không nằm trong lộ trình code (chỉ cấu hình).
 
-## Quy ước code (zalo-bridge)
+## Quy ước code
 
-- Node.js (LTS) + TypeScript, ESM (`import`), vì zca-js là ESM và có sẵn type.
-- Cấu hình qua biến môi trường, có `.env.example` (không commit `.env`, cookie hay file credentials). Biến dự kiến: `CHATWOOT_BASE_URL`, `CHATWOOT_ACCOUNT_ID`, `CHATWOOT_API_TOKEN`, `CHATWOOT_BOT_TOKEN`, `DATABASE_URL`, `CREDENTIALS_ENCRYPTION_KEY`, `ANTHROPIC_API_KEY`, `PORT`. Cấu hình riêng từng tài khoản Zalo (inbox, secret, proxy) nằm trong DB, không nằm trong env.
-- Mọi handler phải idempotent và không làm crash process: bắt lỗi từng tin nhắn, log kèm `ownId`/`threadId`/`conversation_id`, không log nội dung nhạy cảm hay credentials.
-- Tiếng Việt có dấu: đảm bảo UTF-8 xuyên suốt.
+- Node.js (LTS) + TypeScript, ESM, `moduleResolution: NodeNext` (import tương đối có đuôi `.js`). Service chạy thẳng TS bằng `tsx` (cả production) vì `@trcf/bridge-core` export file `.ts`.
+- Code dùng chung cho cả hai kênh đặt trong `packages/bridge-core` và export qua `src/index.ts`; code riêng một kênh ở trong service đó. Service mới = `runBridge({ name, card, ui, createConnector, createConnectSessions, extendApp? })`.
+- Cấu hình qua env, mỗi service một `.env` (không commit) từ `.env.example`. Biến chung: `HOST`, `PORT`, `BRIDGE_PUBLIC_URL` (URL Chatwoot gọi về service), `CHATWOOT_BASE_URL`, `CHATWOOT_PUBLIC_URL?`, `CHATWOOT_ACCOUNT_ID`, `CHATWOOT_API_TOKEN`, `DATABASE_URL`, `CREDENTIALS_ENCRYPTION_KEY`, `LOG_LEVEL`. Riêng OA: `ZALO_APP_ID`, `ZALO_APP_SECRET`, `ZALO_OA_SECRET_KEY`, `BRIDGE_EXTERNAL_URL`. Cấu hình từng kênh (inbox, secret, credentials) nằm trong DB.
+- Handler phải idempotent và không làm crash process: bắt lỗi từng tin, log kèm `channel`/`threadId`/`conversationId`, không log nội dung tin hay credentials.
+- Tiếng Việt có dấu: UTF-8 xuyên suốt; comment, log, thông báo giao diện bằng tiếng Việt.
 
 ## Lệnh thường dùng
 
 Chatwoot (`cd infra/chatwoot`):
 ```bash
-./init-env.sh                                                  # lần đầu: tạo .env với secret ngẫu nhiên
+./init-env.sh                                                         # lần đầu: tạo .env với secret ngẫu nhiên
 docker compose up -d postgres redis
 docker compose run --rm rails bundle exec rails db:chatwoot_prepare   # lần đầu / sau khi nâng version
-docker compose up -d                                           # chạy tất cả
+docker compose up -d
 docker compose logs -f rails sidekiq
-curl http://localhost:3100/api                                 # kiểm tra version + trạng thái
+curl http://localhost:3100/api                                        # version + trạng thái
 ```
 
-zalo-bridge (`cd services/zalo-bridge`, cần `.env` từ `.env.example`):
+Bridge (thư mục gốc):
 ```bash
 pnpm install
-pnpm dev            # chạy bridge (tsx watch), tự chạy migration khi khởi động
-pnpm typecheck
-pnpm db:generate    # sau khi sửa src/store/schema.ts: sinh migration mới trong drizzle/
-pnpm db:migrate
-open http://localhost:3200/admin    # quản trị (cần đang đăng nhập Chatwoot bằng admin): quét QR, trạng thái, kết nối lại
-curl http://127.0.0.1:3200/health   # số tài khoản / số đang online
+pnpm dev:personal          # services/zalo-personal (tsx watch), tự migrate DB khi khởi động
+pnpm dev:oa                # services/zalo-oa, cần ZALO_* + BRIDGE_EXTERNAL_URL trong .env
+pnpm typecheck             # cả 3 package
+pnpm db:generate           # sau khi sửa packages/bridge-core/src/store/schema.ts
+open http://localhost:3200/admin        # quản trị Zalo cá nhân (cần đăng nhập Chatwoot bằng admin)
+open http://localhost:3201/admin        # quản trị Zalo OA
+curl http://localhost:3200/health       # số kênh / số đang online
 ```
 
 Chưa có test tự động và lint.
 
 Ghi chú:
-- zca-js 2.2.0 có `index.d.ts` gốc lỗi với `moduleResolution: NodeNext`, nên `tsconfig.json` dùng `paths` trỏ về `dist/index.d.ts`. Khi nâng zca-js, kiểm tra lại và bỏ workaround nếu đã sửa.
-- Trang `/admin` không có mật khẩu riêng: đọc cookie `cw_d_session_info` của dashboard Chatwoot (header devise_token_auth `access-token`/`client`/`uid`), gọi `GET /api/v1/profile` để kiểm tra user là **administrator** của `CHATWOOT_ACCOUNT_ID` (cache 60s). Vì vậy trang phải **cùng host với Chatwoot**: dev mở `http://localhost:3200/admin` (không dùng 127.0.0.1), production đặt dưới cùng domain qua reverse proxy. POST yêu cầu header `x-requested-with: zalo-admin` (chống CSRF).
-- **Kênh "Zalo" trong Add Inbox** (Settings → Inboxes → Add Inbox): Installation Config `DASHBOARD_SCRIPTS` = `<script src="http://localhost:3200/chatwoot/zalo-channel.js"></script>` (đặt qua Super Admin → Settings hoặc `rails runner` + `GlobalConfig.clear_cache`). Script (`src/admin/chatwoot-script.ts`) clone thẻ API trong lưới `.grid > button` thành thẻ "Zalo", bấm vào mở popup iframe `/admin?connect` (QR); quét xong trang popup `postMessage` `zalo:connected` về Chatwoot và chuyển tới `/settings/inboxes/new/<inboxId>/agents` (bước thêm nhân viên có sẵn). Script dựa vào DOM Chatwoot v4.18 (`ChannelList.vue`, `ChannelSelector.vue`): khi nâng version phải kiểm tra lại thẻ Zalo còn hiện. Inbox vẫn hiện icon API (đổi icon cần fork). Lên production phải sửa URL script.
-- Trang admin được nhúng vào Chatwoot làm **Dashboard App "Zalo"** (Settings → Integrations → Dashboard Apps, URL `http://localhost:3200/admin`): hiện thành tab trong màn hình cuộc chat. Lên production phải sửa URL này.
 - Không đặt script tên `login` trong package.json: `pnpm login` là lệnh có sẵn của pnpm (đăng nhập npm).
-- pnpm 11 chặn build script mặc định: `pnpm-workspace.yaml` đã cho phép `esbuild` (cần cho tsx).
+- pnpm 11 chặn build script mặc định: `pnpm-workspace.yaml` ở gốc cho phép `esbuild` (cần cho tsx).
+- Script ngoài workspace (VD trong scratchpad) không phân giải được `@trcf/bridge-core`: import bằng đường dẫn tuyệt đối tới `packages/bridge-core/src/index.ts`.

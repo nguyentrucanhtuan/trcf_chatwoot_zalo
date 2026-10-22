@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+  - services/*
+
+# pnpm 11 chặn build script mặc định; esbuild cần cho tsx.
+allowBuilds:
+  esbuild: true

@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // zca-js 2.2.0: index.d.ts gốc dùng `export * from "./dist"`, không phân giải được với NodeNext.
+    "paths": { "zca-js": ["./node_modules/zca-js/dist/index.d.ts"] }
+  },
+  "include": ["src"]
+}

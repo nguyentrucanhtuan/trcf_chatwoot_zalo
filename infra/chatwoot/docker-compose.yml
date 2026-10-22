@@ -1,6 +1,6 @@
 # Dựa trên docker-compose.production.yaml chính thức của Chatwoot.
 # Khác bản gốc: pin version, cổng cấu hình được, postgres/redis đọc mật khẩu từ .env,
-# và tạo thêm database `zalo_bridge` cho zalo-bridge (xem postgres-init/).
+# và tạo thêm database zalo_personal, zalo_oa cho các service bridge (xem postgres-init/).
 # Không thêm `extra_hosts: host.docker.internal:host-gateway`: nó tạo thêm bản ghi IPv6 trong /etc/hosts,
 # Ruby chọn IPv6 trước và webhook tới bridge trên host bị "Network unreachable". DNS của Docker Desktop
 # đã tự phân giải host.docker.internal ra IPv4.

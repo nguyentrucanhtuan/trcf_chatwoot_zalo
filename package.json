@@ -1,0 +1,16 @@
+{
+  "name": "trcf-chat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:personal": "pnpm --filter zalo-personal dev",
+    "dev:oa": "pnpm --filter zalo-oa dev",
+    "typecheck": "pnpm -r typecheck",
+    "db:generate": "pnpm --filter @trcf/bridge-core db:generate"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
